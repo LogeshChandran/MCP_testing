@@ -36,30 +36,30 @@ async def main():
 
 
         # Get the ReAct prompt from LangChain Hub
-        prompt = hub.pull("hwchase17/react")
+        # prompt = hub.pull("hwchase17/react")
 
 
         # Convert tools to LangChain Tool objects
-        langchain_tools = [
-            Tool(
-                name=tool.name,
-                func=tool.invoke,  # Assuming tool.invoke is the correct method
-                description=tool.description,
-            )
-            for tool in tools
-        ]
+        # langchain_tools = [
+        #     Tool(
+        #         name=tool.name,
+        #         func=tool.invoke,  # Assuming tool.invoke is the correct method
+        #         description=tool.description,
+        #     )
+        #     for tool in tools
+        # ]
 
         # Create ReAct agent
-        agent = create_react_agent(model, tools=tools)  # Changed
+        agent = create_react_agent(model=model, tools=tools,)  # Changed
 
 
         agent_executor = AgentExecutor(agent=agent, tools=tools)
 
         math_response = await agent.ainvoke({"messages": "what's (3 + 5) x 12?"})
-        print("Math Response:", math_response["messages"])
+        print("Math Response:", math_response["messages"][-1].content)
 
-        weather_response = await agent_executor.ainvoke({"input": "what is the weather in nyc?"})
-        print("Weather Response:", weather_response)
+        weather_response = await agent.ainvoke({"input": "what is the weather in nyc?"})
+        print("Weather Response:", weather_response["messages"][-1].content)
 
     except Exception as e:
         print(f"An error occurred: {e}")

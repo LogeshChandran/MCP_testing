@@ -1,0 +1,832 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "2c1b0952",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "api_key = \"\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "22fabe30",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Use a pipeline as a high-level helper\n",
+    "from transformers import pipeline\n",
+    "\n",
+    "pipe = pipeline(\"text-generation\", model=\"ibm-granite/granite-3.3-2b-instruct\")\n",
+    "messages = [\n",
+    "    {\"role\": \"user\", \"content\": \"Who are you?\"},\n",
+    "]\n",
+    "pipe(messages)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e2318c9e",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from vllm import LLM, SamplingParams\n",
+    "from vllm.assets.image import ImageAsset\n",
+    "from huggingface_hub import hf_hub_download\n",
+    "from PIL import Image\n",
+    "\n",
+    "model_path = \"ibm-granite/granite-vision-3.3-2b\"\n",
+    "\n",
+    "model = LLM(\n",
+    "    model=model_path,\n",
+    ")\n",
+    "\n",
+    "sampling_params = SamplingParams(\n",
+    "    temperature=0.2,\n",
+    "    max_tokens=64,\n",
+    ")\n",
+    "\n",
+    "# Define the question we want to answer and format the prompt\n",
+    "image_token = \"<image>\"\n",
+    "system_prompt = \"<|system|>\\nA chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.\\n\"\n",
+    "\n",
+    "question = \"What is the highest scoring model on ChartQA and what is its score?\"\n",
+    "prompt = f\"{system_prompt}<|user|>\\n{image_token}\\n{question}\\n<|assistant|>\\n\"\n",
+    "# img_path = hf_hub_download(repo_id=model_path, filename='example.png')\n",
+    "image = Image.open(\"example.png\").convert(\"RGB\")\n",
+    "print(image)\n",
+    "\n",
+    "# Build the inputs to vLLM; the image is passed as `multi_modal_data`.\n",
+    "inputs = {\n",
+    "    \"prompt\": prompt,\n",
+    "    \"multi_modal_data\": {\n",
+    "        \"image\": image,\n",
+    "    }\n",
+    "}\n",
+    "\n",
+    "outputs = model.generate(inputs, sampling_params=sampling_params)\n",
+    "print(f\"Generated text: {outputs[0].outputs[0].text}\")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "fd94f375",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "os.environ[\"GROQ_API_KEY\"] = \"\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "6c0534ed",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain_groq import ChatGroq\n",
+    "\n",
+    "llm = ChatGroq(\n",
+    "    model=\"openai/gpt-oss-20b\",\n",
+    "    temperature=0,\n",
+    "    max_tokens=None,\n",
+    "    reasoning_format=\"parsed\",\n",
+    "    timeout=None,\n",
+    "    max_retries=2,\n",
+    "    # other params...\n",
+    ")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "454b184c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain.prompts import ChatPromptTemplate\n",
+    "from langchain_core.messages import HumanMessage, SystemMessage\n",
+    "from langchain_core.output_parsers import StrOutputParser, JsonOutputParser\n",
+    "\n",
+    "\n",
+    "async def agent_chunker(text,MAX_CHUNK_TOKENS=500):\n",
+    "   semantic_chunking_prompt =\"\"\"You are an expert in text preprocessing and semantic segmentation for NLP pipelines.\n",
+    "   Your task is to transform the given paragraph into semantic chunks that preserve meaning\n",
+    "   while ensuring each chunk is independent and self-contained.\n",
+    "\n",
+    "   ### RULES\n",
+    "\n",
+    "   1. Cleaning\n",
+    "      - Remove unwanted special characters: @, #, $, %, ^, &, *, ~, |, _, multiple spaces, or formatting artifacts.\n",
+    "      - Keep punctuation that improves readability and sentence clarity.\n",
+    "      - Normalize spacing after punctuation.\n",
+    "\n",
+    "   2. Semantic Chunking\n",
+    "      - Group sentences so that each chunk expresses ONE coherent idea or closely related set of ideas.\n",
+    "      - Preserve the original phrasing whenever possible; avoid unnecessary rewording.\n",
+    "      - Make each chunk self-contained:\n",
+    "         - Replace pronouns (\"it\", \"he\", \"she\", \"they\", \"this\", \"that\") with the full entity name.\n",
+    "         - Add necessary context modifiers to nouns or statements so they can be understood out of context.\n",
+    "\n",
+    "   3. Chunk Size Constraint (Token-Based)\n",
+    "      - Each chunk must be ≤ {MAX_CHUNK_TOKENS} tokens.\n",
+    "      - If a chunk exceeds the limit, split it into smaller, still meaningful chunks.\n",
+    "\n",
+    "   4. Output Format\n",
+    "      - Output must be only a valid JSON array of strings.\n",
+    "      - Each string is one semantic chunk.\n",
+    "      - Do not include explanations or other text.\n",
+    "\n",
+    "   ---\n",
+    "\n",
+    "   ### Example Input:\n",
+    "   Apple Inc. announced a new iPhone yesterday. It features an improved camera and longer battery life.\n",
+    "   The device will be available in stores next month along with new accessories.\n",
+    "\n",
+    "   ### Example Output (MAX_CHUNK_TOKENS = 20):\n",
+    "   [\n",
+    "   \"Apple Inc. announced a new iPhone yesterday. The new iPhone features an improved camera and longer battery life.\",\n",
+    "   \"The new iPhone will be available in stores next month along with new accessories.\"\n",
+    "   ]\n",
+    "\n",
+    "   ---\n",
+    "\n",
+    "   Now process the following paragraph:\n",
+    "   {text}\n",
+    "   \"\"\"\n",
+    "   # ai_msg = llm.invoke(semantic_chunking_prompt)\n",
+    "   prompt = ChatPromptTemplate.from_template(semantic_chunking_prompt)\n",
+    "   chain_chunks = prompt | llm | JsonOutputParser()\n",
+    "   chunks = await chain_chunks.ainvoke({\"MAX_CHUNK_TOKENS\":MAX_CHUNK_TOKENS,\"text\":text})\n",
+    "   return chunks"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "368d637d",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# import bs4\n",
+    "# from langchain import hub\n",
+    "# from langchain_community.document_loaders import WebBaseLoader\n",
+    "# from langchain_core.documents import Document\n",
+    "# from langchain_text_splitters import RecursiveCharacterTextSplitter\n",
+    "# # from langgraph.graph import START, StateGraph\n",
+    "# from typing_extensions import List, TypedDict\n",
+    "\n",
+    "# loader = WebBaseLoader(\n",
+    "#     web_paths=(\"https://lilianweng.github.io/posts/2023-06-23-agent/\",),\n",
+    "#     bs_kwargs=dict(\n",
+    "#         parse_only=bs4.SoupStrainer(\n",
+    "#             class_=(\"post-content\", \"post-title\", \"post-header\")\n",
+    "#         )\n",
+    "#     ),\n",
+    "# )\n",
+    "# docs = loader.load()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0903cb5e",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain_community.document_loaders import DirectoryLoader"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "c2e63ae5",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "loader = DirectoryLoader(\"./AHC_AGENT\",show_progress=True,use_multithreading=True)\n",
+    "docs = loader.load()\n",
+    "docs"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 98,
+   "id": "8d21c479",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "'Lorem ipsum\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit. Nunc ac faucibus odio.\\n\\nVestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit dictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius.\\n\\nNulla facilisi.\\n\\nAenean congue fringilla justo ut aliquam.\\n\\nMauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante\\n\\nsagittis.\\n\\nMorbi viverra semper lorem nec molestie.\\n\\nMaecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\n12\\n\\n10\\n\\n8\\n\\n6\\n\\n4\\n\\nColumn 1 Column 2 Column 3\\n\\n2\\n\\n0\\n\\nRow 1\\n\\nRow 2\\n\\nRow 3\\n\\nRow 4\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod. Fusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies.\\n\\nCras fringilla ipsum magna, in fringilla dui commodo\\n\\na.\\n\\nLorem ipsum\\n\\nLorem ipsum Lorem ipsum\\n\\n1\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nLorem\\n\\n2\\n\\nCras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nIpsum\\n\\n3\\n\\nAliquam erat volutpat.\\n\\nLorem\\n\\n4\\n\\nFusce vitae vestibulum velit.\\n\\nLorem\\n\\n5\\n\\nEtiam vehicula luctus fermentum.\\n\\nIpsum\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit.\\n\\nNunc ac faucibus odio. Vestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nosatra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit. Nunc ac faucibus odio.\\n\\nVestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit dictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius.\\n\\nNulla facilisi.\\n\\nAenean congue fringilla justo ut aliquam.\\n\\nMauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante\\n\\nsagittis.\\n\\nMorbi viverra semper lorem nec molestie.\\n\\nMaecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\n12\\n\\n10\\n\\n8\\n\\n6\\n\\n4\\n\\nColumn 1 Column 2 Column 3\\n\\n2\\n\\n0\\n\\nRow 1\\n\\nRow 2\\n\\nRow 3\\n\\nRow 4\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod. Fusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies.\\n\\nCras fringilla ipsum magna, in fringilla dui commodo\\n\\na.\\n\\nLorem ipsum\\n\\nLorem ipsum Lorem ipsum\\n\\n1\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nLorem\\n\\n2\\n\\nCras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nIpsum\\n\\n3\\n\\nAliquam erat volutpat.\\n\\nLorem\\n\\n4\\n\\nFusce vitae vestibulum velit.\\n\\nLorem\\n\\n5\\n\\nEtiam vehicula luctus fermentum.\\n\\nIpsum\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit.\\n\\nNunc ac faucibus odio. Vestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nosatra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit. Nunc ac faucibus odio.\\n\\nVestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit dictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius.\\n\\nNulla facilisi.\\n\\nAenean congue fringilla justo ut aliquam.\\n\\nMauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante\\n\\nsagittis.\\n\\nMorbi viverra semper lorem nec molestie.\\n\\nMaecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\n12\\n\\n10\\n\\n8\\n\\n6\\n\\n4\\n\\nColumn 1 Column 2 Column 3\\n\\n2\\n\\n0\\n\\nRow 1\\n\\nRow 2\\n\\nRow 3\\n\\nRow 4\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod. Fusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies.\\n\\nCras fringilla ipsum magna, in fringilla dui commodo\\n\\na.\\n\\nLorem ipsum\\n\\nLorem ipsum Lorem ipsum\\n\\n1\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nLorem\\n\\n2\\n\\nCras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nIpsum\\n\\n3\\n\\nAliquam erat volutpat.\\n\\nLorem\\n\\n4\\n\\nFusce vitae vestibulum velit.\\n\\nLorem\\n\\n5\\n\\nEtiam vehicula luctus fermentum.\\n\\nIpsum\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit.\\n\\nNunc ac faucibus odio. Vestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nosatra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit. Nunc ac faucibus odio.\\n\\nVestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit dictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius.\\n\\nNulla facilisi.\\n\\nAenean congue fringilla justo ut aliquam.\\n\\nMauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante\\n\\nsagittis.\\n\\nMorbi viverra semper lorem nec molestie.\\n\\nMaecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\n12\\n\\n10\\n\\n8\\n\\n6\\n\\n4\\n\\nColumn 1 Column 2 Column 3\\n\\n2\\n\\n0\\n\\nRow 1\\n\\nRow 2\\n\\nRow 3\\n\\nRow 4\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod. Fusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies.\\n\\nCras fringilla ipsum magna, in fringilla dui commodo\\n\\na.\\n\\nLorem ipsum\\n\\nLorem ipsum Lorem ipsum\\n\\n1\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nLorem\\n\\n2\\n\\nCras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nIpsum\\n\\n3\\n\\nAliquam erat volutpat.\\n\\nLorem\\n\\n4\\n\\nFusce vitae vestibulum velit.\\n\\nLorem\\n\\n5\\n\\nEtiam vehicula luctus fermentum.\\n\\nIpsum\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit.\\n\\nNunc ac faucibus odio. Vestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nosatra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit. Nunc ac faucibus odio.\\n\\nVestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit dictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius.\\n\\nNulla facilisi.\\n\\nAenean congue fringilla justo ut aliquam.\\n\\nMauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante\\n\\nsagittis.\\n\\nMorbi viverra semper lorem nec molestie.\\n\\nMaecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\n12\\n\\n10\\n\\n8\\n\\n6\\n\\n4\\n\\nColumn 1 Column 2 Column 3\\n\\n2\\n\\n0\\n\\nRow 1\\n\\nRow 2\\n\\nRow 3\\n\\nRow 4\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod. Fusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies.\\n\\nCras fringilla ipsum magna, in fringilla dui commodo\\n\\na.\\n\\nLorem ipsum\\n\\nLorem ipsum Lorem ipsum\\n\\n1\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nLorem\\n\\n2\\n\\nCras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nIpsum\\n\\n3\\n\\nAliquam erat volutpat.\\n\\nLorem\\n\\n4\\n\\nFusce vitae vestibulum velit.\\n\\nLorem\\n\\n5\\n\\nEtiam vehicula luctus fermentum.\\n\\nIpsum\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit.\\n\\nNunc ac faucibus odio. Vestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nosatra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit. Nunc ac faucibus odio.\\n\\nVestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit dictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius.\\n\\nNulla facilisi.\\n\\nAenean congue fringilla justo ut aliquam.\\n\\nMauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante\\n\\nsagittis.\\n\\nMorbi viverra semper lorem nec molestie.\\n\\nMaecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\n12\\n\\n10\\n\\n8\\n\\n6\\n\\n4\\n\\nColumn 1 Column 2 Column 3\\n\\n2\\n\\n0\\n\\nRow 1\\n\\nRow 2\\n\\nRow 3\\n\\nRow 4\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod. Fusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies.\\n\\nCras fringilla ipsum magna, in fringilla dui commodo\\n\\na.\\n\\nLorem ipsum\\n\\nLorem ipsum Lorem ipsum\\n\\n1\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nLorem\\n\\n2\\n\\nCras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nIpsum\\n\\n3\\n\\nAliquam erat volutpat.\\n\\nLorem\\n\\n4\\n\\nFusce vitae vestibulum velit.\\n\\nLorem\\n\\n5\\n\\nEtiam vehicula luctus fermentum.\\n\\nIpsum\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nLorem ipsum dolor sit amet, consectetur adipiscing\\n\\nelit.\\n\\nNunc ac faucibus odio. Vestibulum neque massa, scelerisque sit amet ligula eu, congue molestie mi. Praesent ut varius sem. Nullam at porttitor arcu, nec lacinia nisi. Ut ac dolor vitae odio interdum condimentum. Vivamus dapibus sodales ex, vitae malesuada ipsum cursus convallis. Maecenas sed egestas nulla, ac condimentum orci. Mauris diam felis, vulputate ac suscipit et, iaculis non est. Curabitur semper arcu ac ligula semper, nec luctus nisl blandit. Integer lacinia ante ac libero lobortis imperdiet. Nullam mollis convallis ipsum, ac accumsan nunc vehicula vitae. Nulla eget justo in felis tristique fringilla. Morbi sit amet tortor quis risus auctor condimentum. Morbi in ullamcorper elit. Nulla iaculis tellus sit amet mauris tempus fringilla.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\\n\\nMaecenas mauris lectus, lobortis et purus mattis, blandit\\n\\ndictum tellus.\\n\\nMaecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\\n\\nIn non mauris justo. Duis vehicula mi vel mi pretium, a viverra erat efficitur. Cras aliquam est ac eros varius, id iaculis dui auctor. Duis pretium neque ligula, et pulvinar mi placerat et. Nulla nec nunc sit amet nunc posuere vestibulum. Ut id neque eget tortor mattis tristique. Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\\n\\nIn eleifend velit vitae libero sollicitudin euismod.\\n\\nFusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\\n\\nEtiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nosatra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.'"
+      ]
+     },
+     "execution_count": 98,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "text = docs[1].page_content\n",
+    "text"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 96,
+   "id": "738a8a16",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "378"
+      ]
+     },
+     "execution_count": 96,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "text_list = text.split(\"\\n\\n\")\n",
+    "len(text_list)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 100,
+   "id": "dfddd334",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "50362"
+      ]
+     },
+     "execution_count": 100,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "len(text)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 97,
+   "id": "33104dd9",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "text = 'What is a Sample Text Paragraph?\\nA sample text paragraph is a written section that illustrates a specific idea or theme. It typically includes a topic sentence, supporting details, and a concluding sentence. Sample paragraphs can be used for various purposes, such as demonstrating writing style, presenting information, or providing examples in educational contexts.\\n\\nStructure of a Sample Text Paragraph\\nTopic Sentence: This is the first sentence that states the main idea of the paragraph. It sets the tone and direction for the rest of the text.\\nSupporting Sentences: These sentences provide evidence, examples, or explanations that bolster the main idea. They are essential for developing the paragraph’s theme and providing clarity.\\nConcluding Sentence: This wraps up the paragraph, reinforcing the main idea and providing a transition to the next point or paragraph.\\nImportance of Sample Text Paragraphs\\nSample text paragraphs are vital for several reasons:\\n\\nClarity: Well-structured paragraphs help convey ideas clearly, making it easier for readers to understand the content.\\nOrganization: They provide a framework for organizing thoughts, which is essential for effective communication.\\nEngagement: Engaging paragraphs capture the reader’s interest, encouraging them to continue reading.\\nTips for Writing Effective Sample Text Paragraphs\\nBe Concise: Keep sentences clear and to the point. Avoid unnecessary jargon that might confuse the reader.\\nUse Active Voice: Active voice makes writing more dynamic and engaging. For example, instead of saying, “The book was read by the student,” say, “The student read the book.”\\nVary Sentence Length: Mix short and long sentences to maintain a natural flow and keep the reader’s interest.\\nEdit and Revise: Always review your paragraphs for clarity, coherence, and grammatical accuracy. This process helps ensure that your writing is polished and professional.\\nExamples of Sample Text Paragraphs\\nExample 1: Descriptive Paragraph\\n\\nThe sun dipped below the horizon, casting a warm golden glow over the tranquil lake. The water shimmered like a thousand diamonds, reflecting the hues of orange and pink that painted the sky. A gentle breeze rustled the leaves of the nearby trees, creating a soothing melody that echoed through the quiet evening. In that moment, time seemed to stand still, inviting anyone who witnessed it to pause and appreciate the beauty of nature.\\n\\nExample 2: Expository Paragraph\\n\\nRenewable energy is an essential component of sustainable development. Unlike fossil fuels, which are finite and contribute to environmental degradation, renewable energy sources such as solar, wind, and hydroelectric power offer a clean and sustainable alternative. These energy sources are abundant and can significantly reduce greenhouse gas emissions, helping to combat climate change. By investing in renewable energy, countries can create jobs, enhance energy security, and promote environmental sustainability.\\n\\nConclusion\\nUnderstanding and utilizing sample text paragraphs is crucial for effective writing. By mastering their structure and purpose, writers can enhance clarity, organization, and engagement in their work. Whether you are a student, a professional, or a casual writer, these skills will serve you well in all your writing endeavors.\\n\\nFrequently Asked Questions (FAQs)\\n1. What is the purpose of a sample text paragraph?\\n\\nThe purpose of a sample text paragraph is to illustrate a specific idea or theme clearly and effectively, serving as a model for writers.\\n\\n2. How do I know if my paragraph is effective?\\n\\nAn effective paragraph should have a clear topic sentence, supporting details that are relevant and concise, and a strong concluding sentence that ties everything together.\\n\\n3. Can I use sample text paragraphs in academic writing?\\n\\nYes, sample text paragraphs can be used in academic writing to provide examples, illustrate points, and demonstrate proper writing techniques.\\n\\n4. What are common mistakes to avoid in writing paragraphs?\\n\\nCommon mistakes include overly long sentences, lack of focus on the main idea, and failure to provide adequate supporting details.\\n\\n5. How can I improve my paragraph writing skills?\\n\\nTo improve your paragraph writing skills, practice writing regularly, read well-structured texts, and seek feedback from peers or mentors.'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 104,
+   "id": "bcbe2940",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "chunk = await agent_chunker(text=text[30000:],MAX_CHUNK_TOKENS=1000)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 105,
+   "id": "390290f4",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Donec ante est, blandit sit amet tristique vel, lacinia pulvinar arcu. Pellentesque scelerisque fermentum erat, id posuere justo pulvinar ut. Cras id eros sed enim aliquam lobortis. Sed lobortis nisl ut eros efficitur tincidunt. Cras justo mi, porttitor quis mattis vel, ultricies ut purus. Ut facilisis et lacus eu cursus.\n",
+      "In eleifend velit vitae libero sollicitudin euismod.\n",
+      "Fusce vitae vestibulum velit. Pellentesque vulputate lectus quis pellentesque commodo. Aliquam erat volutpat. Vestibulum in egestas velit. Pellentesque fermentum nisl vitae fringilla venenatis. Etiam id mauris vitae orci maximus ultricies. Cras fringilla ipsum magna, in fringilla dui commodo a.\n",
+      "Etiam vehicula luctus fermentum. In vel metus congue, pulvinar lectus vel, fermentum dui. Maecenas ante orci, egestas ut aliquet sit amet, sagittis a magna. Aliquam ante quam, pellentesque ut dignissim quis, laoreet eget est. Aliquam erat volutpat. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Ut ullamcorper justo sapien, in cursus libero viverra eget. Vivamus auctor imperdiet urna, at pulvinar leo posuere laoreet. Suspendisse neque nisl, fringilla at iaculis scelerisque, ornare vel dolor. Ut et pulvinar nunc. Pellentesque fringilla mollis efficitur. Nullam venenatis commodo imperdiet. Morbi velit neque, semper quis lorem quis, efficitur dignissim ipsum. Ut ac lorem sed turpis imperdiet eleifend sit amet id sapien.\n",
+      "Maecenas mauris lectus, lobortis et purus mattis, blandit dictum tellus.\n",
+      "Maecenas non lorem quis tellus placerat varius. Nulla facilisi. Aenean congue fringilla justo ut aliquam. Mauris id ex erat. Nunc vulputate neque vitae justo facilisis, non condimentum ante sagittis. Morbi viverra semper lorem nec molestie. Maecenas tincidunt est efficitur ligula euismod, sit amet ornare est vulputate.\n",
+      "12\n",
+      "10\n",
+      "8\n",
+      "6\n",
+      "4\n",
+      "Column 1 Column 2 Column 3\n",
+      "2\n",
+      "0\n",
+      "Row 1\n",
+      "Row 2\n",
+      "Row 3\n",
+      "Row 4\n"
+     ]
+    }
+   ],
+   "source": [
+    "for c in chunk:\n",
+    "    print(c)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "40340c73",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "chunks = [\n",
+    "    \"A sample text paragraph is a written section that illustrates a specific idea or theme. A sample text paragraph typically includes a topic sentence, supporting details, and a concluding sentence. Sample paragraphs can be used for various purposes, such as demonstrating writing style, presenting information, or providing examples in educational contexts.\",\n",
+    "    \"Topic Sentence: The Topic Sentence is the first sentence that states the main idea of the paragraph. The Topic Sentence sets the tone and direction for the rest of the text. Supporting Sentences: Supporting Sentences provide evidence, examples, or explanations that bolster the main idea. Supporting Sentences are essential for developing the paragraph’s theme and providing clarity. Concluding Sentence: The Concluding Sentence wraps up the paragraph, reinforcing the main idea and providing a transition to the next point or paragraph.\",\n",
+    "    \"Sample text paragraphs are vital for several reasons. Clarity: Well-structured paragraphs help convey ideas clearly, making it easier for readers to understand the content. Organization: Sample text paragraphs provide a framework for organizing thoughts, which is essential for effective communication. Engagement: Engaging paragraphs capture the reader’s interest, encouraging them to continue reading.\",\n",
+    "    \"Be Concise: Keep sentences clear and to the point. Avoid unnecessary jargon that might confuse the reader. Use Active Voice: Active voice makes writing more dynamic and engaging. For example, instead of saying, “The book was read by the student,” say, “The student read the book.” Vary Sentence Length: Mix short and long sentences to maintain a natural flow and keep the reader’s interest. Edit and Revise: Always review paragraphs for clarity, coherence, and grammatical accuracy. The Edit and Revise process helps ensure that writing is polished and professional.\",\n",
+    "    \"The sun dipped below the horizon, casting a warm golden glow over the tranquil lake. The water shimmered like a thousand diamonds, reflecting the hues of orange and pink that painted the sky. A gentle breeze rustled the leaves of the nearby trees, creating a soothing melody that echoed through the quiet evening. In that moment, time seemed to stand still, inviting anyone who witnessed the scene to pause and appreciate the beauty of nature.\",\n",
+    "    \"Renewable energy is an essential component of sustainable development. Unlike fossil fuels, which are finite and contribute to environmental degradation, renewable energy sources such as solar, wind, and hydroelectric power offer a clean and sustainable alternative. Renewable energy sources are abundant and can significantly reduce greenhouse gas emissions, helping to combat climate change. By investing in renewable energy, countries can create jobs, enhance energy security, and promote environmental sustainability.\",\n",
+    "    \"Understanding and utilizing sample text paragraphs is crucial for effective writing. By mastering their structure and purpose, writers can enhance clarity, organization, and engagement in their work. Whether the reader is a student, a professional, or a casual writer, these skills will serve the reader well in all writing endeavors.\",\n",
+    "    \"What is the purpose of a sample text paragraph? The purpose of a sample text paragraph is to illustrate a specific idea or theme clearly and effectively, serving as a model for writers.\",\n",
+    "    \"How does the reader know if the reader's paragraph is effective? An effective paragraph should have a clear topic sentence, supporting details that are relevant and concise, and a strong concluding sentence that ties everything together.\",\n",
+    "    \"Can the reader use sample text paragraphs in academic writing? Yes, sample text paragraphs can be used in academic writing to provide examples, illustrate points, and demonstrate proper writing techniques.\",\n",
+    "    \"What are common mistakes to avoid in writing paragraphs? Common mistakes include overly long sentences, lack of focus on the main idea, and failure to provide adequate supporting details.\",\n",
+    "    \"How can the reader improve the reader's paragraph writing skills? To improve the reader's paragraph writing skills, practice writing regularly, read well-structured texts, and seek feedback from peers or mentors.\"\n",
+    "]\n",
+    "print(len(chunks))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b230487d",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain_ollama import OllamaEmbeddings\n",
+    "\n",
+    "embeddings = OllamaEmbeddings(model=\"qwen3:1.7b\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "838e2e4c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain_chroma import Chroma\n",
+    "\n",
+    "vector_store = Chroma(\n",
+    "    collection_name=\"example_collection\",\n",
+    "    embedding_function=embeddings,\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "59f66a2e",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain_chroma import Chroma\n",
+    "\n",
+    "vector_store = Chroma(\n",
+    "    collection_name=\"example_collection\",\n",
+    "    embedding_function=embeddings,\n",
+    "    persist_directory=\"./chroma_langchain_db\",\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "55962bf0",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain_core.documents import Document\n",
+    "from uuid import uuid4\n",
+    "\n",
+    "documents = [Document(\n",
+    "    page_content=chunk,\n",
+    "    metadata={\"source\": \"tweet\"},\n",
+    "    id=1,\n",
+    ")for chunk in chunks]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "4ed30494",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "for chunk in chunks:\n",
+    "    print(chunk)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "99155977",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "uuids = [str(uuid4()) for _ in range(len(documents))]\n",
+    "\n",
+    "data = await vector_store.aadd_documents(documents=documents, ids=uuids)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "9d63ed7e",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "results = vector_store.similarity_search(\n",
+    "    \"Perpose of sample text ?\",\n",
+    "    k=2,\n",
+    "    filter={\"source\": \"tweet\"},\n",
+    ")\n",
+    "for res in results:\n",
+    "    print(f\"{res.page_content}\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7fe4f7c1",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain.prompts import ChatPromptTemplate\n",
+    "\n",
+    "# RAG-Fusion: Related\n",
+    "template = \"\"\"You are a helpful assistant that generates multiple search queries based on a single input query. \\n\n",
+    "Generate multiple search queries related to: {question} \\n\n",
+    "Output json format:\"\"\"\n",
+    "prompt_rag_fusion = ChatPromptTemplate.from_template(template)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "6368ece8",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain_core.output_parsers import StrOutputParser, JsonOutputParser\n",
+    "# from langchain_openai import ChatOpenAI\n",
+    "\n",
+    "generate_queries = (\n",
+    "    prompt_rag_fusion \n",
+    "    | llm\n",
+    "    | JsonOutputParser() \n",
+    "    # | (lambda x: x.split(\"\\n\"))\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "6831225d",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "question = \"what is leave policy? and list of of leaves ?\"\n",
+    "generate_queries.invoke({\"question\": question})"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "2691eca1",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "os.environ[\"GROQ_API_KEY\"] = \"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\"\n",
+    "\n",
+    "class Prompt_store:\n",
+    "  DECOMPOSITION_PROMPT = \"\"\"**Prompt for Question‑Splitting (JSON‑only Output)**\n",
+    "You are an assistant that extracts individual questions from a single user query that may contain multiple questions.  \n",
+    "Your task: split the query into the smallest logical chunks, each representing a single question. and each question should be standalone question \n",
+    "\n",
+    "Input:  \n",
+    "{question}\n",
+    "\n",
+    "Output: a JSON array of strings, each string being one extracted question, **exactly** as it appears in the input (maintain original wording). No other text or explanation should be included.  \n",
+    "If the input contains only one question, return a JSON array with that single question.\n",
+    "\n",
+    "Example  \n",
+    "Input:  \n",
+    "\"Can you explain how blockchain works, and also tell me the best way to invest in cryptocurrencies?\"\n",
+    "\n",
+    "Output:  \n",
+    "```json\n",
+    "[\n",
+    "  \"Can you explain how blockchain works?\",\n",
+    "  \"What is the best way to invest in cryptocurrencies?\"\n",
+    "]```\"\"\"\n",
+    "  FINAL_ANSWER_TEMPLATE = \"\"\"You are an assistant for question-answering tasks. Use the following pieces of retrived context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maxmimun ans keeping the answer concise\n",
+    "  Question: {question}\n",
+    "  Context: {context}\n",
+    "  Answer:\n",
+    "\"\"\"\n",
+    "  connection = \"postgresql+psycopg://langchain:langchain@localhost:6024/langchain\"\n",
+    "  EMBEDDING_MODEL_NAME = \"qwen3:1.7b\"\n",
+    "  LLM_MODEL_NAME = \"openai/gpt-oss-20b\"\n",
+    "  COLLECTION_NAME = \"NEST\"\n",
+    "\n",
+    "\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "d9da39e4",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain.globals import set_debug\n",
+    "set_debug(False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "6a66e413",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from langchain_groq import ChatGroq\n",
+    "from langchain_core.output_parsers import StrOutputParser, JsonOutputParser\n",
+    "from langchain_postgres import PGVector\n",
+    "from langchain_ollama import OllamaEmbeddings\n",
+    "from langchain.load import dumps, loads\n",
+    "from langchain.prompts import ChatPromptTemplate\n",
+    "from langchain_chroma import Chroma\n",
+    "\n",
+    "class RAG(Prompt_store):\n",
+    "    def __init__(self,llm_model_name=None,embedding_model_name=None,DECOMPOSITION_PROMPT=None,FINAL_ANSWER_TEMPLATE=None,COLLECTION_NAME=None):\n",
+    "        super().__init__()\n",
+    "        if llm_model_name:\n",
+    "            self.LLM_MODEL_NAME = llm_model_name\n",
+    "        \n",
+    "        if embedding_model_name:\n",
+    "            self.EMBEDDING_MODEL_NAME = embedding_model_name\n",
+    "\n",
+    "        if DECOMPOSITION_PROMPT:\n",
+    "            self.DECOMPOSITION_PROMPT = DECOMPOSITION_PROMPT\n",
+    "\n",
+    "        if FINAL_ANSWER_TEMPLATE:\n",
+    "            self.FINAL_ANSWER_TEMPLATE = FINAL_ANSWER_TEMPLATE\n",
+    "\n",
+    "        if COLLECTION_NAME:\n",
+    "            self.COLLECTION_NAME = COLLECTION_NAME\n",
+    "    def get_llm(self,model_name=None):\n",
+    "        if not model_name:\n",
+    "            model_name = self.LLM_MODEL_NAME\n",
+    "            \n",
+    "        llm = ChatGroq(\n",
+    "            model=model_name,\n",
+    "            temperature=0,\n",
+    "            max_tokens=None,\n",
+    "            reasoning_format=\"parsed\",\n",
+    "            timeout=None,\n",
+    "            max_retries=2\n",
+    "        )\n",
+    "        return llm\n",
+    "    \n",
+    "    def get_embeddings(self,model_name=None):\n",
+    "        if not model_name:\n",
+    "            model_name = self.EMBEDDING_MODEL_NAME\n",
+    "        embeddings = OllamaEmbeddings(model=model_name)\n",
+    "        return embeddings\n",
+    "    \n",
+    "    def get_vector_store(self,collection_name=None,model_name=None):\n",
+    "        if not model_name:\n",
+    "            model_name = self.EMBEDDING_MODEL_NAME\n",
+    "\n",
+    "        if not collection_name:\n",
+    "            collection_name = self.COLLECTION_NAME\n",
+    "        # vector_store = PGVector(\n",
+    "        #     embeddings=self.get_embeddings(model_name),\n",
+    "        #     collection_name=collection_name,\n",
+    "        #     connection=self.connection,\n",
+    "        #     use_jsonb=True,\n",
+    "        # )\n",
+    "        # return vector_store\n",
+    "        vector_store = Chroma(\n",
+    "            collection_name=collection_name,\n",
+    "            embedding_function=self.get_embeddings(model_name),\n",
+    "            persist_directory=\"./chroma_langchain_db\",\n",
+    "        )\n",
+    "        return vector_store\n",
+    "\n",
+    "    async def upload_documents(self,documents,uuids):\n",
+    "        data = await vector_store.aadd_documents(documents=documents, ids=uuids)\n",
+    "\n",
+    "    def get_retriever(self,collection_name=None):\n",
+    "        if not collection_name:\n",
+    "            collection_name = self.COLLECTION_NAME\n",
+    "\n",
+    "        return self.get_vector_store(collection_name).as_retriever()\n",
+    "    \n",
+    "    async def retriever_document(self,question):\n",
+    "        return await self.get_retriever().ainvoke(question)\n",
+    "    \n",
+    "    async def retriever_batch_document(self,question_list:list):\n",
+    "        return await self.get_retriever().abatch(question_list)\n",
+    "    \n",
+    "    async def decomposition_query(self, question,decomposition_prompt_template=None):\n",
+    "        if not decomposition_prompt_template:\n",
+    "            decomposition_prompt_template = self.DECOMPOSITION_PROMPT\n",
+    "\n",
+    "        decomposition_prompt = ChatPromptTemplate.from_template(decomposition_prompt_template)\n",
+    "        generate_queries_decomposition = decomposition_prompt | self.get_llm() | JsonOutputParser()\n",
+    "        questions = await generate_queries_decomposition.ainvoke({\"question\":question})\n",
+    "        return questions\n",
+    "\n",
+    "    async def retriever_document(self, question):\n",
+    "        # retrieval_chain = self.decomposition_query | {\"question\":question,\"context\": self.get_retriever().map()} | self.get_unique_union\n",
+    "        sub_queries = await self.decomposition_query(question=question)\n",
+    "        if not sub_queries:\n",
+    "            sub_queries = [question]\n",
+    "        all_results = await self.retriever_batch_document(sub_queries)\n",
+    "        return self.get_unique_union(all_results)\n",
+    "    \n",
+    "    def get_unique_union(self,documents: list[list]):\n",
+    "        \"\"\" Unique union of retrieved docs \"\"\"\n",
+    "        flattened_docs = [dumps(doc) for sublist in documents for doc in sublist]\n",
+    "        unique_docs = list(set(flattened_docs))\n",
+    "        return [loads(doc) for doc in unique_docs]\n",
+    "    \n",
+    "    async def rag_response(self,question,context,final_answer_template=None):\n",
+    "        if not final_answer_template:\n",
+    "            final_answer_template = self.FINAL_ANSWER_TEMPLATE\n",
+    "        \n",
+    "        print(context)\n",
+    "        prompt = ChatPromptTemplate.from_template(final_answer_template)\n",
+    "        final_rag_chain = prompt | self.get_llm() | StrOutputParser()\n",
+    "\n",
+    "        final_response = await final_rag_chain.ainvoke({\"context\":context,\"question\":question})\n",
+    "        return final_response\n",
+    "    \n",
+    "    async def rag(self,question,metadata={}):\n",
+    "        context = await self.retriever_document(question=question)\n",
+    "        final_response = await self.rag_response(question=question,context=context)\n",
+    "        return final_response"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "d62ed73c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "rag = RAG()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0eb4cd9f",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# question = \"What are your favorite hobbies, and how did you get into them\"\n",
+    "question = \"Perpose of sample text and Use of Perpose of sample text ?\"\n",
+    "final_response = await rag.rag(question=question)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "da402e3c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(final_response)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0d90d414",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "template = \"\"\"Answer the following question based on this context:\n",
+    "\n",
+    "{context}\n",
+    "\n",
+    "Question: {question}\n",
+    "\"\"\"\n",
+    "\n",
+    "prompt = ChatPromptTemplate.from_template(template)\n",
+    "\n",
+    "final_rag_chain = (\n",
+    "    prompt\n",
+    "    | llm\n",
+    "    | StrOutputParser()\n",
+    ")\n",
+    "\n",
+    "ai = final_rag_chain.invoke({\"context\":ai,\"question\":question})"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ab8c67f3",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(ai)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "5efc7cf4",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "rag.get_unique_union(ai.invoke({\"question\":question}))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "6dce89a9",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "template = \"\"\"You are an AI language model assistant. Your task is to generate five \n",
+    "different versions of the given user question to retrieve relevant documents from a vector \n",
+    "database. By generating multiple perspectives on the user question, your goal is to help\n",
+    "the user overcome some of the limitations of the distance-based similarity search. \n",
+    "Provide these alternative questions separated by newlines. Original question: {question}\"\"\"\n",
+    "prompt_perspectives = ChatPromptTemplate.from_template(template)\n",
+    "\n",
+    "from langchain_core.output_parsers import StrOutputParser\n",
+    "from langchain_openai import ChatOpenAI\n",
+    "\n",
+    "generate_queries = (\n",
+    "    prompt_perspectives \n",
+    "    | llm\n",
+    "    | StrOutputParser() \n",
+    "    | (lambda x: x.split(\"\\n\"))\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "38fca40d",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "generate_queries.invoke({\"question\": question})"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "239ae554",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": ".venv",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.12.10"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}

@@ -6,32 +6,76 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from pathlib import Path
+import urllib3
 
-# ================= CONFIG =================
+# ================= GLOBAL CONFIG =================
 TIMEOUT = 5
 DEFAULT_ENV_FILES = ["local.json", "dev.json", "stage.json"]
 
+# SMTP CONFIG (CHANGE AS NEEDED)
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 SMTP_USER = "alert@example.com"
 SMTP_PASS = "APP_PASSWORD"
 FROM_EMAIL = "alert@example.com"
-# ==========================================
+# =================================================
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+# ---------- UTILS ----------
 def load_config(file_path):
     with open(file_path, "r") as f:
         return json.load(f)
 
 
 def is_server_up(url):
+    """
+    Server-level check only.
+    Any HTTP response => server UP
+    Exceptions => server DOWN
+    """
     try:
-        requests.head(url, timeout=TIMEOUT, verify=False)
-        return True, None
+        response = requests.head(url, timeout=TIMEOUT, verify=False)
+        return True, str(response.status_code)
     except requests.exceptions.RequestException as e:
-        return False, str(e)
+        return False, e
 
 
+def classify_error(error):
+    """
+    Convert raw errors into user-friendly messages + severity + color
+    """
+    if error is None:
+        return "OK", "Server is running", "#4CAF50"
+
+    err = str(error).lower()
+
+    if "connection refused" in err:
+        return "CRITICAL", "Server is DOWN (connection refused)", "#d32f2f"
+
+    if "timeout" in err:
+        return "CRITICAL", "Server is DOWN (request timeout)", "#d32f2f"
+
+    if "name or service not known" in err or "dns" in err:
+        return "CRITICAL", "Server is DOWN (DNS resolution failed)", "#d32f2f"
+
+    if "ssl" in err:
+        return "CRITICAL", "Server is DOWN (SSL handshake error)", "#d32f2f"
+
+    if err.isdigit():
+        status = int(err)
+        if status == 404:
+            return "WARNING", "Endpoint not found (404)", "#f57c00"
+        if status in (401, 403):
+            return "WARNING", "Unauthorized / Forbidden access", "#f57c00"
+        if status >= 500:
+            return "ERROR", "Server error (5xx)", "#d32f2f"
+
+    return "ERROR", "Unknown server error", "#d32f2f"
+
+
+# ---------- HTML BUILDERS ----------
 def generate_table(category, rows):
     if not rows:
         return ""
@@ -41,10 +85,11 @@ def generate_table(category, rows):
 
     for row in rows:
         table_rows += f"""
-        <tr>
+        <tr style="background-color:{row['color']}; color:white;">
             <td>{row['name']}</td>
             <td>{row['url']}</td>
-            <td style="color:red;">{row['error']}</td>
+            <td>{row['severity']}</td>
+            <td>{row['error']}</td>
             <td>{row['time']}</td>
         </tr>
         """
@@ -53,10 +98,11 @@ def generate_table(category, rows):
     <h3>{title}</h3>
     <table border="1" cellpadding="8" cellspacing="0"
            style="border-collapse:collapse;width:100%;">
-        <tr style="background:#f2f2f2;">
+        <tr style="background:#333;color:white;">
             <th>Server Name</th>
             <th>URL</th>
-            <th>Error</th>
+            <th>Severity</th>
+            <th>Issue</th>
             <th>Checked At</th>
         </tr>
         {table_rows}
@@ -75,11 +121,21 @@ def build_html_email(env, grouped_failures):
     html_body = f"""
     <html>
     <body style="font-family: Arial, sans-serif;">
-        <h2 style="color:red;">🚨 Server Down Alert</h2>
+        <h2 style="color:#d32f2f;">🚨 Server Health Alert</h2>
         <p><b>Environment:</b> {env}</p>
+
         {body_sections}
-        <p>Please investigate and restore the services.</p>
-        <p><b>Server Monitoring System</b></p>
+
+        <p>
+            <b>Severity Guide:</b><br/>
+            🔴 CRITICAL – Server Down<br/>
+            🟠 WARNING – Path / Access issue
+        </p>
+
+        <p>
+            Regards,<br/>
+            <b>Server Monitoring System</b>
+        </p>
     </body>
     </html>
     """
@@ -87,6 +143,7 @@ def build_html_email(env, grouped_failures):
     return subject, html_body
 
 
+# ---------- EMAIL ----------
 def send_email(recipients, subject, html_body):
     msg = MIMEMultipart()
     msg["From"] = FROM_EMAIL
@@ -100,6 +157,7 @@ def send_email(recipients, subject, html_body):
         server.sendmail(FROM_EMAIL, recipients, msg.as_string())
 
 
+# ---------- CORE LOGIC ----------
 def process_environment(env_file):
     config = load_config(env_file)
     environment = config.get("environment", Path(env_file).stem.upper())
@@ -112,32 +170,37 @@ def process_environment(env_file):
             continue
 
         for server in servers:
-            is_up, error = is_server_up(server["url"])
+            is_up, raw_error = is_server_up(server["url"])
 
             if not is_up:
+                severity, friendly_error, color = classify_error(raw_error)
+
                 grouped_failures.setdefault(category, []).append({
                     "name": server["name"],
                     "url": server["url"],
-                    "error": error,
+                    "severity": severity,
+                    "error": friendly_error,
+                    "color": color,
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
+
                 recipients.update(server["emails"])
 
     if grouped_failures:
         subject, html_body = build_html_email(environment, grouped_failures)
         send_email(list(recipients), subject, html_body)
-        print(f"📧 Alert sent for {environment}")
+        print(f"📧 Alert email sent for {environment}")
     else:
         print(f"✅ All servers UP in {environment}. No email sent.")
 
 
 def main():
-    # Case 1: specific env
+    # Case 1: Single environment
     if len(sys.argv) == 2:
         process_environment(sys.argv[1])
         return
 
-    # Case 2: all envs
+    # Case 2: All environments
     for env_file in DEFAULT_ENV_FILES:
         if Path(env_file).exists():
             process_environment(env_file)
